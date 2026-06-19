@@ -1,0 +1,32 @@
+[
+  {
+    "content": "分析需求并设计页面结构",
+    "id": "1",
+    "status": "completed"
+  },
+  {
+    "content": "创建5个核心页面的组件文件",
+    "id": "2",
+    "status": "completed"
+  },
+  {
+    "content": "实现Tab切换和路由配置",
+    "id": "3",
+    "status": "completed"
+  },
+  {
+    "content": "添加Mock数据和交互逻辑",
+    "id": "4",
+    "status": "completed"
+  },
+  {
+    "content": "优化UI样式和细节",
+    "id": "5",
+    "status": "completed"
+  },
+  {
+    "content": "验证构建和预览效果",
+    "id": "6",
+    "status": "completed"
+  }
+]
