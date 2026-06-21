@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from app.database import init_db
+from app.api.meeting import router as meeting_router
+from app.api.setting import router as setting_router
+from app.database import get_db, init_db, SessionLocal
 
 load_dotenv()
 
@@ -25,10 +27,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(meeting_router, prefix="/api/meeting", tags=["meeting"])
+app.include_router(setting_router, prefix="/api/setting", tags=["setting"])
+
 
 @app.on_event("startup")
 def on_startup():
     init_db()
+    from app.services.meeting_service import ensure_seed_meetings
+
+    db = SessionLocal()
+    try:
+        ensure_seed_meetings(db)
+    finally:
+        db.close()
 
 
 @app.get("/health")
