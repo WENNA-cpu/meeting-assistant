@@ -52,6 +52,9 @@ pip-wheel-metadata/
 *.egg-info/
 .coverage
 htmlcov/
+backend/data/
+backend/uploads/
+*.db
 
 # Java / Kotlin
 target/
