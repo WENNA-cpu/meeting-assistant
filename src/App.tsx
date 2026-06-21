@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   FileUp,
   FileText,
@@ -8,11 +9,11 @@ import {
   Moon,
   Sun
 } from 'lucide-react';
-import MeetingImport from './pages/MeetingImport';
-import SmartSummary from './pages/SmartSummary';
-import TaskPriority from './pages/TaskPriority';
-import ReportOptimize from './pages/ReportOptimize';
-import TaskCenter from './pages/TaskCenter';
+import {
+  getStoredMeetingId,
+  pathWithMeetingId,
+  SMART_SUMMARY_PATH,
+} from './utils/meetingRoute';
 
 type TabKey = 'import' | 'summary' | 'priority' | 'report' | 'tasks';
 type Theme = 'light' | 'dark';
@@ -21,19 +22,32 @@ interface TabItem {
   key: TabKey;
   label: string;
   icon: React.ElementType;
+  path: string;
 }
 
 const tabs: TabItem[] = [
-  { key: 'import', label: '会议导入', icon: FileUp },
-  { key: 'summary', label: '智能纪要', icon: FileText },
-  { key: 'priority', label: '任务优先级', icon: ListTodo },
-  { key: 'report', label: '汇报优化', icon: Sparkles },
-  { key: 'tasks', label: '任务中心', icon: CheckSquare },
+  { key: 'import', label: '会议导入', icon: FileUp, path: '/import' },
+  { key: 'summary', label: '智能纪要', icon: FileText, path: SMART_SUMMARY_PATH },
+  { key: 'priority', label: '任务优先级', icon: ListTodo, path: '/priority' },
+  { key: 'report', label: '汇报优化', icon: Sparkles, path: '/report' },
+  { key: 'tasks', label: '任务中心', icon: CheckSquare, path: '/tasks' },
 ];
 
+const pathToTab = (pathname: string): TabKey => {
+  if (pathname === '/' || pathname === '/import') return 'import';
+  if (pathname.startsWith('/smart-summary') || pathname.startsWith('/summary')) return 'summary';
+  if (pathname.startsWith('/priority')) return 'priority';
+  if (pathname.startsWith('/report')) return 'report';
+  if (pathname.startsWith('/tasks')) return 'tasks';
+  return 'import';
+};
+
 function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const activeTab = pathToTab(location.pathname);
+
   const [theme, setTheme] = useState<Theme>(() => {
-    // 从 localStorage 或默认值初始化
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('theme') as Theme;
       if (saved === 'light' || saved === 'dark') {
@@ -42,9 +56,7 @@ function App() {
     }
     return 'light';
   });
-  const [activeTab, setActiveTab] = useState<TabKey>('import');
 
-  // 同步主题到 DOM 和 localStorage
   useEffect(() => {
     document.documentElement.classList.remove('light', 'dark');
     document.documentElement.classList.add(theme);
@@ -52,32 +64,23 @@ function App() {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
-  const renderContent = () => {
-    switch (activeTab) {
-      case 'import':
-        return <MeetingImport />;
-      case 'summary':
-        return <SmartSummary />;
-      case 'priority':
-        return <TaskPriority />;
-      case 'report':
-        return <ReportOptimize />;
-      case 'tasks':
-        return <TaskCenter />;
-      default:
-        return <MeetingImport />;
-    }
-  };
-
   const toggleTheme = () => {
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
+  const handleTabNavigate = (tab: TabItem) => {
+    if (tab.key === 'import') {
+      navigate(tab.path);
+      return;
+    }
+    const queryId = new URLSearchParams(location.search).get('meeting_id');
+    const meetingId = queryId ?? getStoredMeetingId();
+    navigate(pathWithMeetingId(tab.path, meetingId));
+  };
+
   return (
     <div className="h-screen w-full flex flex-col bg-gray-50 dark:bg-gray-900" data-theme={theme}>
-      {/* Top Navigation Bar */}
       <header className="h-16 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between px-6 shrink-0">
-        {/* Logo and Title */}
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center">
             <Sparkles className="w-5 h-5 text-white" />
@@ -92,7 +95,6 @@ function App() {
           </div>
         </div>
 
-        {/* Theme Toggle */}
         <button
           onClick={toggleTheme}
           className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
@@ -106,9 +108,7 @@ function App() {
         </button>
       </header>
 
-      {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar Navigation */}
         <nav className="w-56 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
           <div className="p-4 space-y-1">
             {tabs.map(tab => {
@@ -117,7 +117,7 @@ function App() {
               return (
                 <button
                   key={tab.key}
-                  onClick={() => setActiveTab(tab.key)}
+                  onClick={() => handleTabNavigate(tab)}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${
                     isActive
                       ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
@@ -134,7 +134,6 @@ function App() {
             })}
           </div>
 
-          {/* Bottom Info */}
           <div className="mt-auto p-4 border-t border-gray-200 dark:border-gray-700">
             <div className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-lg p-3">
               <p className="text-xs font-medium text-blue-700 dark:text-blue-300 mb-1">
@@ -147,9 +146,8 @@ function App() {
           </div>
         </nav>
 
-        {/* Content Area */}
         <main className="flex-1 overflow-hidden">
-          {renderContent()}
+          <Outlet />
         </main>
       </div>
     </div>
