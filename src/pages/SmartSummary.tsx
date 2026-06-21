@@ -1,104 +1,173 @@
-import React, { useState, useRef } from 'react';
-import { Edit3, Check, X, FileText, Lightbulb, Users, CheckSquare, AlertCircle, Download, CheckCheck, Sparkles, Play, Pause, Search, Filter } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
+import { Edit3, Check, X, FileText, Lightbulb, Users, CheckSquare, AlertCircle, Download, CheckCheck, Sparkles, Play, Search, Trash2, Loader2, ChevronDown, CheckCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-
-interface TranscriptSegment {
-  id: string;
-  speaker: string;
-  content: string;
-  timestamp: string;
-}
-
-interface StructuredItem {
-  id: string;
-  type: 'decision' | 'issue' | 'assignment' | 'todo';
-  content: string;
-  confirmed: boolean;
-  sourceSegmentIds: string[];
-}
+import {
+  fetchMeetingSummary,
+  updateMeetingSummary,
+  extractTasksFromSummary,
+  fetchMeetingList,
+  formatMeetingLabel,
+  type TranscriptSegment,
+  type StructuredItem,
+  type MeetingListItem,
+} from '../api/meeting';
+import { pathWithMeetingId, setStoredMeetingId } from '../utils/meetingRoute';
 
 type FilterType = 'all' | 'decision' | 'assignment' | 'todo' | 'issue';
 
 const SmartSummary: React.FC = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlMeetingId = searchParams.get('meeting_id');
+  const [activeMeetingId, setActiveMeetingId] = useState<string | null>(urlMeetingId);
+  const prevUrlMeetingIdRef = useRef(urlMeetingId);
+
+  useEffect(() => {
+    if (urlMeetingId !== prevUrlMeetingIdRef.current) {
+      prevUrlMeetingIdRef.current = urlMeetingId;
+      if (urlMeetingId) {
+        setActiveMeetingId(urlMeetingId);
+      }
+    }
+  }, [urlMeetingId]);
+
+  const resetMeetingViewState = useCallback(() => {
+    setErrorMessage(null);
+    setEditingId(null);
+    setActiveFilter('all');
+    setTranscriptSearch('');
+    setHighlightedSegmentIds([]);
+    setHighlightedSegmentId(null);
+    setStructuredItems([]);
+    setTranscriptSegments([]);
+    setMeetingInfo({ title: '', date: '', participants: [] });
+    setCurrentPlayingId(null);
+    setTaskCount(0);
+  }, []);
+
+  const [taskCount, setTaskCount] = useState(0);
+
+  const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
+  const [meetingsLoading, setMeetingsLoading] = useState(true);
+  const defaultMeetingApplied = useRef(false);
+  const loadSeqRef = useRef(0);
+
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [meetingInfo, setMeetingInfo] = useState({ title: '', date: '', participants: [] as string[] });
+  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const [structuredItems, setStructuredItems] = useState<StructuredItem[]>([]);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<FilterType>('all');
-  const [currentPlayingId, setCurrentPlayingId] = useState<string>('s4');
+  const [transcriptSearch, setTranscriptSearch] = useState('');
+  const [currentPlayingId, setCurrentPlayingId] = useState<string | null>(null);
+  const [highlightedSegmentIds, setHighlightedSegmentIds] = useState<string[]>([]);
+  const [generatingTasks, setGeneratingTasks] = useState(false);
+  const [summaryModal, setSummaryModal] = useState<
+    | { kind: 'confirm-all-prompt'; count: number }
+    | { kind: 'confirm-all-info' }
+    | { kind: 'generate-warning' }
+    | { kind: 'generate-success'; confirmed: number; tasks: number }
+    | null
+  >(null);
   const transcriptRefs = useRef<Record<string, HTMLDivElement>>({});
 
-  // Mock会议信息
-  const meetingInfo = {
-    title: 'Q1产品规划周会',
-    date: '2024-01-15 14:00',
-    participants: ['张三', '李四', '王五'],
+  useEffect(() => {
+    if (!activeMeetingId) {
+      if (!meetingsLoading) {
+        setLoading(false);
+        setErrorMessage('缺少会议 ID，请从会议导入页进入');
+      }
+      return;
+    }
+
+    const seq = ++loadSeqRef.current;
+    setStoredMeetingId(activeMeetingId);
+    setLoading(true);
+    resetMeetingViewState();
+
+    (async () => {
+      try {
+        const data = await fetchMeetingSummary(activeMeetingId);
+        if (seq !== loadSeqRef.current) return;
+        setMeetingInfo(data.meeting_info);
+        setTranscriptSegments(data.transcript_segments);
+        setStructuredItems(data.structured_items);
+        setTaskCount(data.task_count ?? 0);
+        if (data.error) {
+          setErrorMessage(data.error);
+        }
+        if (data.transcript_segments.length > 0) {
+          setCurrentPlayingId(data.transcript_segments[0].id);
+        }
+      } catch (err) {
+        if (seq !== loadSeqRef.current) return;
+        setErrorMessage(err instanceof Error ? err.message : '加载纪要失败');
+      } finally {
+        if (seq === loadSeqRef.current) setLoading(false);
+      }
+    })();
+  }, [activeMeetingId, resetMeetingViewState]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setMeetingsLoading(true);
+      try {
+        const list = await fetchMeetingList();
+        if (cancelled) return;
+        setMeetings(list);
+        if (!defaultMeetingApplied.current && list.length > 0) {
+          const currentId = new URLSearchParams(window.location.search).get('meeting_id');
+          if (!currentId) {
+            defaultMeetingApplied.current = true;
+            const latestId = list[0].meeting_id;
+            setStoredMeetingId(latestId);
+            navigate(pathWithMeetingId(location.pathname, latestId), { replace: true });
+          }
+        }
+      } catch {
+        if (!cancelled) setMeetings([]);
+      } finally {
+        if (!cancelled) setMeetingsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, location.pathname]);
+
+  useEffect(() => {
+    if (meetingsLoading || !activeMeetingId || meetings.length === 0) return;
+    if (meetings.some(m => m.meeting_id === activeMeetingId)) return;
+    const fallback = meetings.find(m => m.task_count > 0) ?? meetings[0];
+    setActiveMeetingId(fallback.meeting_id);
+    setStoredMeetingId(fallback.meeting_id);
+    setSearchParams({ meeting_id: fallback.meeting_id }, { replace: true });
+  }, [meetings, meetingsLoading, activeMeetingId, setSearchParams]);
+
+  const handleMeetingChange = (newMeetingId: string) => {
+    if (!newMeetingId || newMeetingId === activeMeetingId) return;
+    setActiveMeetingId(newMeetingId);
+    setStoredMeetingId(newMeetingId);
+    setSearchParams({ meeting_id: newMeetingId });
+    setLoading(true);
+    resetMeetingViewState();
   };
 
-  // Mock原始转写数据（带时间戳和发言人）
-  const transcriptSegments: TranscriptSegment[] = [
-    { id: 's1', speaker: '张三', content: '大家好，今天我们讨论一下Q1的产品规划。首先我想确认一下新功能的优先级。', timestamp: '00:02:15' },
-    { id: 's2', speaker: '李四', content: '我觉得用户反馈最多的搜索功能应该优先做，这个已经拖了两个月了。', timestamp: '00:02:48' },
-    { id: 's3', speaker: '王五', content: '我同意，但是技术架构重构也很重要，不然后续开发会很慢。', timestamp: '00:03:12' },
-    { id: 's4', speaker: '张三', content: '那我们先定下来，搜索功能作为P0优先级，架构重构作为P1。', timestamp: '00:03:45' },
-    { id: 's5', speaker: '李四', content: '好的，我来负责搜索功能的需求文档，预计下周完成。', timestamp: '00:04:02' },
-    { id: 's6', speaker: '王五', content: '那我这边开始准备技术方案，需要两周时间。', timestamp: '00:04:28' },
-    { id: 's7', speaker: '张三', content: '另外，关于UI改版的问题，设计团队说需要更多时间。', timestamp: '00:05:10' },
-    { id: 's8', speaker: '李四', content: '那我们延期到3月中旬吧，先保证核心功能上线。', timestamp: '00:05:35' },
-    { id: 's9', speaker: '王五', content: '还有一个问题，测试环境最近不太稳定，经常部署失败。', timestamp: '00:06:12' },
-    { id: 's10', speaker: '张三', content: '这个问题需要运维团队介入，我来协调一下。', timestamp: '00:06:28' },
-  ];
-
-  const [structuredItems, setStructuredItems] = useState<StructuredItem[]>([
-    {
-      id: '1',
-      type: 'decision',
-      content: '搜索功能作为P0优先级，架构重构作为P1优先级',
-      confirmed: true,
-      sourceSegmentIds: ['s2', 's3', 's4'],
-    },
-    {
-      id: '2',
-      type: 'assignment',
-      content: '李四负责搜索功能需求文档，预计下周完成',
-      confirmed: true,
-      sourceSegmentIds: ['s5'],
-    },
-    {
-      id: '3',
-      type: 'assignment',
-      content: '王五准备技术方案，需要两周时间',
-      confirmed: false,
-      sourceSegmentIds: ['s6'],
-    },
-    {
-      id: '4',
-      type: 'issue',
-      content: 'UI改版需要更多时间，建议延期到3月中旬',
-      confirmed: false,
-      sourceSegmentIds: ['s7', 's8'],
-    },
-    {
-      id: '5',
-      type: 'todo',
-      content: '确保核心功能在3月初上线',
-      confirmed: false,
-      sourceSegmentIds: ['s8'],
-    },
-    {
-      id: '6',
-      type: 'issue',
-      content: '测试环境不稳定，经常部署失败',
-      confirmed: false,
-      sourceSegmentIds: ['s9'],
-    },
-    {
-      id: '7',
-      type: 'assignment',
-      content: '张三协调运维团队解决测试环境问题',
-      confirmed: false,
-      sourceSegmentIds: ['s10'],
-    },
-  ]);
+  const persistItems = useCallback(async (items: StructuredItem[]) => {
+    if (!activeMeetingId) return;
+    try {
+      await updateMeetingSummary(activeMeetingId, items);
+    } catch {
+      setErrorMessage('保存失败，请稍后重试');
+    }
+  }, [activeMeetingId]);
 
   const getTypeConfig = (type: string) => {
     switch (type) {
@@ -115,16 +184,38 @@ const SmartSummary: React.FC = () => {
     }
   };
 
-  // 点击结构化条目时高亮左侧对应文本
-  const handleItemClick = (item: StructuredItem) => {
-    if (item.sourceSegmentIds.length > 0) {
-      const firstSegmentId = item.sourceSegmentIds[0];
-      setHighlightedSegmentId(firstSegmentId);
-      
-      const element = transcriptRefs.current[firstSegmentId];
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // 解析条目关联的转写片段（无 sourceSegmentIds 时按内容模糊匹配）
+  const resolveSourceSegmentIds = useCallback(
+    (item: StructuredItem): string[] => {
+      if (item.sourceSegmentIds?.length > 0) {
+        return item.sourceSegmentIds;
       }
+      const keywords = item.content
+        .split(/[，。、；：!\s]+/)
+        .map(k => k.trim())
+        .filter(k => k.length >= 2);
+      const matched = transcriptSegments.filter(
+        seg =>
+          keywords.some(k => seg.content.includes(k)) ||
+          seg.content.split(/[，。、；：!\s]+/).some(k => k.length >= 4 && item.content.includes(k)),
+      );
+      return matched.map(seg => seg.id);
+    },
+    [transcriptSegments],
+  );
+
+  // 点击结构化条目时高亮左侧对应转写
+  const handleItemClick = (item: StructuredItem) => {
+    const segmentIds = resolveSourceSegmentIds(item);
+    if (segmentIds.length === 0) return;
+
+    setTranscriptSearch('');
+    setHighlightedSegmentIds(segmentIds);
+    setHighlightedSegmentId(segmentIds[0]);
+
+    const element = transcriptRefs.current[segmentIds[0]];
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
 
@@ -134,10 +225,12 @@ const SmartSummary: React.FC = () => {
   };
 
   const handleSave = (id: string) => {
-    setStructuredItems(items =>
-      items.map(item => (item.id === id ? { ...item, content: editContent } : item))
+    const next = structuredItems.map(item =>
+      item.id === id ? { ...item, content: editContent, manually_edited: true } : item
     );
+    setStructuredItems(next);
     setEditingId(null);
+    persistItems(next);
   };
 
   const handleCancel = () => {
@@ -146,15 +239,80 @@ const SmartSummary: React.FC = () => {
   };
 
   const toggleConfirm = (id: string) => {
-    setStructuredItems(items =>
-      items.map(item => (item.id === id ? { ...item, confirmed: !item.confirmed } : item))
+    const next = structuredItems.map(item =>
+      item.id === id ? { ...item, confirmed: !item.confirmed } : item
     );
+    setStructuredItems(next);
+    persistItems(next);
+  };
+
+  const handleDelete = (id: string) => {
+    const next = structuredItems.filter(item => item.id !== id);
+    setStructuredItems(next);
+    persistItems(next);
+  };
+
+  const executeConfirmAll = () => {
+    const next = structuredItems.map(item => ({ ...item, confirmed: true }));
+    setStructuredItems(next);
+    persistItems(next);
+    setSummaryModal(null);
   };
 
   const confirmAll = () => {
-    setStructuredItems(items =>
-      items.map(item => ({ ...item, confirmed: true }))
-    );
+    if (structuredItems.length === 0) return;
+    const unconfirmedCount = structuredItems.filter(item => !item.confirmed).length;
+    if (unconfirmedCount === 0) {
+      setSummaryModal({ kind: 'confirm-all-info' });
+      return;
+    }
+    setSummaryModal({ kind: 'confirm-all-prompt', count: unconfirmedCount });
+  };
+
+  const handleGenerateTasks = async () => {
+    if (!activeMeetingId) return;
+    const confirmedItems = structuredItems.filter(item => item.confirmed);
+    if (confirmedItems.length === 0) {
+      setSummaryModal({ kind: 'generate-warning' });
+      return;
+    }
+    setGeneratingTasks(true);
+    try {
+      await updateMeetingSummary(activeMeetingId, structuredItems);
+      const data = await extractTasksFromSummary(activeMeetingId);
+      setTaskCount(data.count);
+      setSummaryModal({
+        kind: 'generate-success',
+        confirmed: confirmedItems.length,
+        tasks: data.count,
+      });
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : '生成任务失败');
+    } finally {
+      setGeneratingTasks(false);
+    }
+  };
+
+  const goToTaskPriority = () => {
+    if (!activeMeetingId) return;
+    setSummaryModal(null);
+    navigate(pathWithMeetingId('/priority', activeMeetingId));
+  };
+
+  const handleAddManualItem = () => {
+    const content = window.prompt('请输入纪要内容');
+    if (!content?.trim()) return;
+    const newItem: StructuredItem = {
+      id: `manual-${Date.now()}`,
+      type: 'todo',
+      content: content.trim(),
+      confirmed: false,
+      sourceSegmentIds: [],
+      manually_edited: true,
+    };
+    const next = [...structuredItems, newItem];
+    setStructuredItems(next);
+    persistItems(next);
   };
 
   const exportToMarkdown = () => {
@@ -215,17 +373,68 @@ const SmartSummary: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  // 根据筛选条件过滤
+  // 根据筛选条件过滤结构化条目
   const getFilteredItems = () => {
     if (activeFilter === 'all') return structuredItems;
     return structuredItems.filter(item => item.type === activeFilter);
   };
 
-  const filteredItems = getFilteredItems();
+  // 转写区域：按关键词搜索
+  const getVisibleTranscriptSegments = () => {
+    const query = transcriptSearch.trim().toLowerCase();
+    if (!query) return transcriptSegments;
+
+    return transcriptSegments.filter(
+      seg =>
+        seg.content.toLowerCase().includes(query) ||
+        seg.speaker.toLowerCase().includes(query),
+    );
+  };
+
   const confirmedCount = structuredItems.filter(i => i.confirmed).length;
   const totalCount = structuredItems.length;
+  const progressPercent = totalCount > 0 ? (confirmedCount / totalCount) * 100 : 0;
 
-  // 按类型分组用于展示
+  if (loading || (!activeMeetingId && (meetingsLoading || meetings.length === 0))) {
+    return (
+      <div className="h-full flex items-center justify-center bg-white dark:bg-gray-900">
+        <div className="flex flex-col items-center gap-3 text-gray-500 dark:text-gray-400">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+          <p className="text-sm">
+            {activeMeetingId ? '正在加载会议纪要...' : '正在加载会议列表...'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (errorMessage && !meetingInfo.title) {
+    const isMissingId = !activeMeetingId;
+    return (
+      <div className="h-full flex items-center justify-center bg-white dark:bg-gray-900">
+        <div className="text-center max-w-md px-6">
+          <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-3" />
+          <p className="text-gray-700 dark:text-gray-300 mb-2">
+            {isMissingId
+              ? '缺少会议 ID，请先上传会议或从会议导入页进入'
+              : errorMessage}
+          </p>
+          {isMissingId && (
+            <button
+              onClick={() => navigate('/import')}
+              className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors"
+            >
+              返回会议导入
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 根据筛选条件过滤
+  const filteredItems = getFilteredItems();
+  const visibleTranscriptSegments = getVisibleTranscriptSegments();
   const groupedItems = {
     decision: filteredItems.filter(i => i.type === 'decision'),
     issue: filteredItems.filter(i => i.type === 'issue'),
@@ -242,9 +451,31 @@ const SmartSummary: React.FC = () => {
   ];
 
   return (
-    <div className="h-full flex flex-col bg-white dark:bg-gray-900">
+    <div key={activeMeetingId ?? 'empty'} className="h-full flex flex-col bg-white dark:bg-gray-900">
       {/* Header - 会议信息 */}
       <div className="px-8 py-5 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-blue-50/50 to-indigo-50/50 dark:from-blue-900/10 dark:to-indigo-900/10">
+        <div className="flex items-center gap-3 mb-4">
+          <span className="text-sm text-gray-600 dark:text-gray-400 shrink-0">选择会议</span>
+          <div className="relative flex-1 max-w-md">
+            <select
+              value={activeMeetingId ?? ''}
+              onChange={e => handleMeetingChange(e.target.value)}
+              disabled={meetingsLoading || meetings.length === 0}
+              className="w-full appearance-none pl-3 pr-9 py-2 text-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {meetingsLoading && <option value="">加载中...</option>}
+              {!meetingsLoading && meetings.length === 0 && (
+                <option value="">暂无会议，请先导入</option>
+              )}
+              {meetings.map(m => (
+                <option key={m.meeting_id} value={m.meeting_id}>
+                  {formatMeetingLabel(m)} · {m.upload_time}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+          </div>
+        </div>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-4">
             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
@@ -280,18 +511,34 @@ const SmartSummary: React.FC = () => {
         </div>
 
         {/* Progress Bar */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
             已确认 {confirmedCount}/{totalCount}
           </span>
-          <div className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+          <span className="text-xs text-gray-400 dark:text-gray-500">·</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+            任务中心 {taskCount} 条
+            {totalCount > 0 && taskCount !== totalCount && (
+              <span className="text-amber-600 dark:text-amber-400 ml-1">
+                （请确认纪要后点击「生成任务」同步）
+              </span>
+            )}
+          </span>
+          <div className="flex-1 min-w-[120px] h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
             <div
               className="h-full bg-gradient-to-r from-green-500 to-emerald-500 transition-all duration-500"
-              style={{ width: `${(confirmedCount / totalCount) * 100}%` }}
+              style={{ width: `${progressPercent}%` }}
             />
           </div>
         </div>
       </div>
+
+      {errorMessage && (
+        <div className="mx-8 mt-4 flex items-center gap-2 p-3 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 rounded-lg text-sm">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          {errorMessage}
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-hidden">
@@ -300,31 +547,53 @@ const SmartSummary: React.FC = () => {
           <div className="border-r border-gray-200 dark:border-gray-700 overflow-auto bg-gray-50/30 dark:bg-gray-800/30">
             {/* Transcript Header */}
             <div className="sticky top-0 bg-white dark:bg-gray-900 px-6 py-3 border-b border-gray-200 dark:border-gray-700 z-10">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+              <div className="flex items-center justify-between gap-4">
+                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2 shrink-0">
                   <FileText className="w-4 h-4" />
                   原始转写
                 </h3>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-1 max-w-sm justify-end">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                    <input
+                      type="text"
+                      value={transcriptSearch}
+                      onChange={e => setTranscriptSearch(e.target.value)}
+                      placeholder="搜索转写..."
+                      className="w-full pl-7 pr-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
+                    />
+                  </div>
+                  {transcriptSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setTranscriptSearch('')}
+                      className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors shrink-0"
+                      aria-label="清除搜索"
+                    >
+                      <X className="w-3.5 h-3.5 text-gray-400" />
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
                   <div className="flex items-center gap-1.5 px-2 py-1 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-600 dark:text-red-400">
                     <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
                     REC
                   </div>
                   <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">00:45:23</span>
-                  <button className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors">
-                    <Search className="w-3.5 h-3.5 text-gray-400" />
-                  </button>
-                  <button className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors">
-                    <Filter className="w-3.5 h-3.5 text-gray-400" />
-                  </button>
                 </div>
               </div>
             </div>
 
             {/* Transcript Segments */}
             <div className="p-6 space-y-3">
-              {transcriptSegments.map((segment) => {
-                const isHighlighted = highlightedSegmentId === segment.id;
+              {visibleTranscriptSegments.length === 0 ? (
+                <p className="text-sm text-center text-gray-400 dark:text-gray-500 py-8">
+                  {transcriptSearch ? '未找到匹配的转写内容' : '暂无转写片段'}
+                </p>
+              ) : (
+              visibleTranscriptSegments.map((segment) => {
+                const isHighlighted =
+                  highlightedSegmentIds.includes(segment.id) || highlightedSegmentId === segment.id;
                 const isCurrentPlaying = currentPlayingId === segment.id;
                 
                 return (
@@ -384,7 +653,8 @@ const SmartSummary: React.FC = () => {
                     </div>
                   </div>
                 );
-              })}
+              })
+              )}
             </div>
           </div>
 
@@ -392,15 +662,10 @@ const SmartSummary: React.FC = () => {
           <div className="overflow-auto bg-white dark:bg-gray-900">
             {/* Summary Header with Filter Tabs */}
             <div className="sticky top-0 bg-white dark:bg-gray-900 px-6 py-3 border-b border-gray-200 dark:border-gray-700 z-10">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-blue-500" />
-                  结构化纪要
-                </h3>
-                <span className="text-xs text-gray-400 dark:text-gray-500">
-                  点击条目查看原文
-                </span>
-              </div>
+              <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2 mb-3">
+                <Sparkles className="w-4 h-4 text-blue-500" />
+                结构化纪要
+              </h3>
               
               {/* Filter Tabs */}
               <div className="flex gap-1.5 overflow-x-auto scrollbar-thin">
@@ -434,6 +699,11 @@ const SmartSummary: React.FC = () => {
 
             {/* Summary Items */}
             <div className="p-6 space-y-4">
+              {filteredItems.length === 0 && (
+                <p className="text-sm text-center text-gray-400 dark:text-gray-500 py-8">
+                  {activeFilter === 'all' ? '暂无结构化条目' : '该分类下暂无条目'}
+                </p>
+              )}
               <AnimatePresence>
                 {/* Decisions */}
                 {(activeFilter === 'all' || activeFilter === 'decision') && groupedItems.decision.length > 0 && (
@@ -527,10 +797,27 @@ const SmartSummary: React.FC = () => {
                                           确认
                                         </button>
                                       )}
-                                      {item.sourceSegmentIds.length > 0 && (
-                                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                                          · {item.sourceSegmentIds.length}处来源
-                                        </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDelete(item.id);
+                                        }}
+                                        className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        删除
+                                      </button>
+                                      {resolveSourceSegmentIds(item).length > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleItemClick(item);
+                                          }}
+                                          className="text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                                        >
+                                          查看原文
+                                        </button>
                                       )}
                                     </div>
                                   </>
@@ -636,10 +923,27 @@ const SmartSummary: React.FC = () => {
                                           确认
                                         </button>
                                       )}
-                                      {item.sourceSegmentIds.length > 0 && (
-                                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                                          · {item.sourceSegmentIds.length}处来源
-                                        </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDelete(item.id);
+                                        }}
+                                        className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        删除
+                                      </button>
+                                      {resolveSourceSegmentIds(item).length > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleItemClick(item);
+                                          }}
+                                          className="text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                                        >
+                                          查看原文
+                                        </button>
                                       )}
                                     </div>
                                   </>
@@ -745,10 +1049,27 @@ const SmartSummary: React.FC = () => {
                                           确认
                                         </button>
                                       )}
-                                      {item.sourceSegmentIds.length > 0 && (
-                                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                                          · {item.sourceSegmentIds.length}处来源
-                                        </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDelete(item.id);
+                                        }}
+                                        className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        删除
+                                      </button>
+                                      {resolveSourceSegmentIds(item).length > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleItemClick(item);
+                                          }}
+                                          className="text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                                        >
+                                          查看原文
+                                        </button>
                                       )}
                                     </div>
                                   </>
@@ -854,10 +1175,27 @@ const SmartSummary: React.FC = () => {
                                           确认
                                         </button>
                                       )}
-                                      {item.sourceSegmentIds.length > 0 && (
-                                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                                          · {item.sourceSegmentIds.length}处来源
-                                        </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDelete(item.id);
+                                        }}
+                                        className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        删除
+                                      </button>
+                                      {resolveSourceSegmentIds(item).length > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleItemClick(item);
+                                          }}
+                                          className="text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                                        >
+                                          查看原文
+                                        </button>
                                       )}
                                     </div>
                                   </>
@@ -873,7 +1211,10 @@ const SmartSummary: React.FC = () => {
               </AnimatePresence>
 
               {/* Add Manual Item Button */}
-              <button className="w-full py-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-500 dark:text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors flex items-center justify-center gap-2">
+              <button
+                onClick={handleAddManualItem}
+                className="w-full py-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-500 dark:text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors flex items-center justify-center gap-2"
+              >
                 <span className="text-lg">+</span>
                 手动添加条目
               </button>
@@ -895,15 +1236,21 @@ const SmartSummary: React.FC = () => {
                 </div>
                 <div className="flex gap-2">
                   <button
-                    onClick={exportToMarkdown}
-                    className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors flex items-center gap-2"
+                    onClick={handleGenerateTasks}
+                    disabled={!activeMeetingId || generatingTasks}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg text-sm font-medium hover:from-blue-600 hover:to-indigo-600 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <Download className="w-4 h-4" />
-                    导出纪要
-                  </button>
-                  <button className="px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg text-sm font-medium hover:from-blue-600 hover:to-indigo-600 transition-colors flex items-center gap-2">
-                    生成任务
-                    <span className="text-lg">→</span>
+                    {generatingTasks ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        生成中...
+                      </>
+                    ) : (
+                      <>
+                        生成任务
+                        <span className="text-lg">→</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -911,6 +1258,201 @@ const SmartSummary: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {summaryModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+            onClick={() => setSummaryModal(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="relative w-full max-w-md bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              {summaryModal.kind === 'confirm-all-prompt' && (
+                <>
+                  <div className="px-6 pt-6 pb-4">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shrink-0 shadow-lg shadow-green-500/20">
+                        <CheckCheck className="w-6 h-6 text-white" />
+                      </div>
+                      <div className="flex-1 min-w-0 pt-1">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                          确认全部纪要
+                        </h3>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+                          确定将{' '}
+                          <span className="font-semibold text-green-600 dark:text-green-400">
+                            {summaryModal.count}
+                          </span>{' '}
+                          条未确认纪要全部标记为已确认吗？
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryModal(null)}
+                        className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0"
+                        aria-label="关闭"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="px-6 py-4 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSummaryModal(null)}
+                      className="px-5 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      onClick={executeConfirmAll}
+                      className="px-5 py-2 bg-green-500 text-white rounded-lg text-sm font-medium hover:bg-green-600 transition-colors"
+                    >
+                      确认全部
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {summaryModal.kind === 'confirm-all-info' && (
+                <>
+                  <div className="px-6 pt-6 pb-4">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shrink-0 shadow-lg shadow-green-500/20">
+                        <CheckCircle className="w-6 h-6 text-white" />
+                      </div>
+                      <div className="flex-1 min-w-0 pt-1">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                          已全部确认
+                        </h3>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+                          所有纪要条目均已确认，可直接点击「生成任务」同步到任务中心。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryModal(null)}
+                        className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0"
+                        aria-label="关闭"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="px-6 py-4 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-200 dark:border-gray-700 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setSummaryModal(null)}
+                      className="px-5 py-2 bg-green-500 text-white rounded-lg text-sm font-medium hover:bg-green-600 transition-colors"
+                    >
+                      知道了
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {summaryModal.kind === 'generate-warning' && (
+                <>
+                  <div className="px-6 pt-6 pb-4">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center shrink-0 shadow-lg shadow-amber-500/20">
+                        <AlertCircle className="w-6 h-6 text-white" />
+                      </div>
+                      <div className="flex-1 min-w-0 pt-1">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                          无法生成任务
+                        </h3>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+                          请先确认至少一条纪要，再点击「生成任务」同步到任务中心。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryModal(null)}
+                        className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0"
+                        aria-label="关闭"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="px-6 py-4 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-200 dark:border-gray-700 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setSummaryModal(null)}
+                      className="px-5 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors"
+                    >
+                      知道了
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {summaryModal.kind === 'generate-success' && (
+                <>
+                  <div className="px-6 pt-6 pb-4">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0 shadow-lg shadow-blue-500/20">
+                        <Sparkles className="w-6 h-6 text-white" />
+                      </div>
+                      <div className="flex-1 min-w-0 pt-1">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                          任务生成成功
+                        </h3>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
+                          已从{' '}
+                          <span className="font-semibold text-blue-600 dark:text-blue-400">
+                            {summaryModal.confirmed}
+                          </span>{' '}
+                          条已确认纪要生成{' '}
+                          <span className="font-semibold text-blue-600 dark:text-blue-400">
+                            {summaryModal.tasks}
+                          </span>{' '}
+                          个任务，已写入任务中心。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryModal(null)}
+                        className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0"
+                        aria-label="关闭"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="px-6 py-4 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSummaryModal(null)}
+                      className="px-5 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      留在本页
+                    </button>
+                    <button
+                      type="button"
+                      onClick={goToTaskPriority}
+                      className="px-5 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors"
+                    >
+                      前往任务优先级
+                    </button>
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
