@@ -1,0 +1,15 @@
+flowchart TB
+    subgraph MAIN["主链路已实现"]
+        direction LR
+        M1["音频上传"] --> M2["faster-whisper 转写"]
+        M2 --> M3["DeepSeek 结构化"]
+        M3 --> M4["智能纪要"]
+        M4 --> M5["任务拆解"]
+        M5 --> M6["任务中心"]
+    end
+    subgraph EXTRA["配套能力已实现"]
+        direction TB
+        E1["会议切换与多会议管理"]
+        E2["任务中心按会议分组展示"]
+        E3["删除会议：后端 DELETE /api/meeting/id，前端入口在任务中心"]
+    end

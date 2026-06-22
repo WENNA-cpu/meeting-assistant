@@ -1,0 +1,23 @@
+flowchart TB
+    subgraph T1["语音转写"]
+        direction TB
+        A1["faster-whisper 本地模型"]
+        A2["支持 MP3 / WAV / M4A"]
+        A3["转写完成 → 自动进入结构化流程"]
+        A2 --> A1 --> A3
+    end
+    subgraph T2["结构化纪要"]
+        direction TB
+        B1["DeepSeek API"]
+        B2["决策 / 问题 / 分工 / 待办"]
+        B3["人工确认与编辑"]
+        B1 --> B2 --> B3
+    end
+    subgraph T3["任务拆解"]
+        direction TB
+        C1["已确认纪要条目"]
+        C2["四象限看板展示"]
+        C3["拖拽调整优先级"]
+        C1 --> C2 --> C3
+    end
+    T1 --> T2 --> T3
