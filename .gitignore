@@ -54,6 +54,7 @@ pip-wheel-metadata/
 htmlcov/
 backend/data/
 backend/uploads/
+backend/models/
 *.db
 
 # Java / Kotlin

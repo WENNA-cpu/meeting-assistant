@@ -1,4 +1,5 @@
 from typing import Optional
+import traceback
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.meeting_service import (
     build_meeting_conclusions_text,
+    delete_meeting,
     ensure_test_meeting,
     generate_tasks_from_summary,
     get_meeting_tasks,
@@ -25,6 +27,14 @@ from app.services.meeting_service import (
 router = APIRouter()
 
 
+def _friendly_api_error(action: str, exc: Exception, *, status_code: int = 503) -> HTTPException:
+    """将未预期异常转为可读错误，避免直接 500。"""
+    message = str(exc).strip() or exc.__class__.__name__
+    print(f"[ERROR] {action}: {message}")
+    traceback.print_exc()
+    return HTTPException(status_code=status_code, detail=f"{action}失败：{message}")
+
+
 class ImportResponse(BaseModel):
     meeting_id: str
     file_name: str
@@ -33,6 +43,9 @@ class ImportResponse(BaseModel):
     format_valid: bool
     status: str
     message: str = "音频上传成功"
+    transcript_text: str = ""
+    transcript_segments: list[dict] = Field(default_factory=list)
+    transcription_source: str = "mock"
 
 
 class TestMeetingResponse(BaseModel):
@@ -60,6 +73,11 @@ class MeetingListItem(BaseModel):
     task_count: int = 0
     entry_count: int = 0
     is_seed: bool = False
+
+
+class DeleteMeetingResponse(BaseModel):
+    meeting_id: str
+    message: str = "会议已删除"
 
 
 class ExtractTasksRequest(BaseModel):
@@ -161,12 +179,18 @@ class OptimizeReportResponse(BaseModel):
 
 @router.post("/test", response_model=TestMeetingResponse)
 async def create_test_meeting(db: Session = Depends(get_db)):
-    meeting = ensure_test_meeting(db)
-    return TestMeetingResponse(
-        meeting_id=meeting.id,
-        title=meeting.title or "Q1产品规划会（测试）",
-        status=meeting.status,
-    )
+    try:
+        meeting = ensure_test_meeting(db)
+        return TestMeetingResponse(
+            meeting_id=meeting.id,
+            title=meeting.title or "Q1产品规划会（测试）",
+            status=meeting.status or "completed",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise _friendly_api_error("创建测试会议", exc) from exc
 
 
 @router.post("/import", response_model=ImportResponse)
@@ -181,9 +205,24 @@ async def import_meeting(
     content = await file.read()
 
     try:
-        meeting, validation = import_meeting_audio(db, file.filename, content, title)
+        meeting, validation, transcript = import_meeting_audio(db, file.filename, content, title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise _friendly_api_error("会议导入", exc) from exc
+
+    source = transcript.get("source", "mock")
+    real_transcription = source in {"whisper", "ffmpeg-whisper"}
+    if real_transcription:
+        message = "音频上传成功，转写完成"
+    else:
+        error_hint = transcript.get("error")
+        message = "音频上传成功，转写完成（演示数据）"
+        if error_hint:
+            message = f"{message}：{error_hint}"
 
     return ImportResponse(
         meeting_id=meeting.id,
@@ -192,7 +231,10 @@ async def import_meeting(
         file_format=validation.file_format,
         format_valid=validation.valid,
         status=meeting.status,
-        message="音频上传成功，转写完成",
+        message=message,
+        transcript_text=transcript.get("transcript_text", ""),
+        transcript_segments=transcript.get("segments", []),
+        transcription_source=source,
     )
 
 
@@ -201,12 +243,32 @@ async def get_meeting_list(db: Session = Depends(get_db)):
     return list_all_meetings(db)
 
 
+@router.delete("/{meeting_id}", response_model=DeleteMeetingResponse)
+async def remove_meeting(meeting_id: str, db: Session = Depends(get_db)):
+    try:
+        result = delete_meeting(db, meeting_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="会议不存在")
+        return DeleteMeetingResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise _friendly_api_error("删除会议", exc) from exc
+
+
 @router.get("/recent", response_model=list[RecentMeetingItem])
 async def get_recent_meetings(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    return list_recent_meetings(db, limit)
+    try:
+        return list_recent_meetings(db, limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise _friendly_api_error("获取最近上传", exc) from exc
 
 
 class StructuredItemModel(BaseModel):

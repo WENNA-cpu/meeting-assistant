@@ -33,14 +33,20 @@ app.include_router(setting_router, prefix="/api/setting", tags=["setting"])
 
 @app.on_event("startup")
 def on_startup():
-    init_db()
-    from app.services.meeting_service import ensure_seed_meetings
-
-    db = SessionLocal()
     try:
-        ensure_seed_meetings(db)
-    finally:
-        db.close()
+        init_db()
+        from app.services.meeting_service import ensure_seed_meetings
+
+        db = SessionLocal()
+        try:
+            ensure_seed_meetings(db)
+        except Exception as exc:
+            db.rollback()
+            print(f"[WARN] 种子会议初始化失败，服务仍可启动：{exc}")
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"[ERROR] 数据库初始化失败：{exc}")
 
 
 @app.get("/health")

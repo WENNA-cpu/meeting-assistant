@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.meeting import Meeting, MeetingEntry, Task
+from app.services.text_utils import simplify_segments, to_simplified_chinese
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -383,7 +384,7 @@ def _entry_to_dict(entry: MeetingEntry) -> dict:
     return {
         "id": entry.id,
         "type": entry.entry_type,
-        "content": entry.content,
+        "content": to_simplified_chinese(entry.content or ""),
         "confirmed": entry.is_confirmed,
         "sourceSegmentIds": source_ids,
         "manually_edited": entry.manually_edited,
@@ -404,7 +405,7 @@ def _dict_to_entry(meeting_id: str, item: dict) -> MeetingEntry:
         id=entry_id,
         meeting_id=meeting_id,
         entry_type=item.get("type", "todo"),
-        content=item.get("content", ""),
+        content=to_simplified_chinese(str(item.get("content", "")).strip()),
         is_confirmed=bool(item.get("confirmed", False)),
         source_segment_ids=json.dumps(source_ids, ensure_ascii=False),
         manually_edited=bool(item.get("manually_edited", False)),
@@ -746,12 +747,55 @@ def _sync_mock_transcript(meeting: Meeting, *, force: bool = False) -> None:
         meeting.title = Path(meeting.file_name).stem or "Q1产品规划会"
 
 
+def _apply_transcript_result(meeting: Meeting, segments: list[dict], *, participants: list[str] | None = None) -> None:
+    segments = simplify_segments(segments)
+    meeting.transcript_json = json.dumps(segments, ensure_ascii=False)
+    meeting.participants_json = json.dumps(
+        participants or ["未知"],
+        ensure_ascii=False,
+    )
+    meeting.summary_json = None
+    meeting.status = "transcribed"
+    # 新转写后清空旧纪要条目，避免展示 Mock/历史数据
+    for entry in list(meeting.entries):
+        meeting.entries.remove(entry)
+
+
 def _apply_mock_transcript(meeting: Meeting) -> None:
-    """模拟 ASR 转写，后续替换为真实 ASR API。"""
+    """模拟 ASR 转写，Whisper 未安装或转写失败时使用。"""
     meeting.title = Path(meeting.file_name).stem or "未命名会议"
     _sync_mock_transcript(meeting)
     meeting.summary_json = None
     meeting.status = "transcribed"
+
+
+def _transcribe_uploaded_audio(meeting: Meeting) -> dict:
+    """调用本地 Whisper 转写；失败时回退 Mock。"""
+    from app.services.whisper_service import WhisperTranscriptionError, transcribe_audio_file
+
+    file_path = Path(meeting.file_path)
+    try:
+        result = transcribe_audio_file(file_path, meeting.file_name)
+        _apply_transcript_result(meeting, result["segments"])
+        return result
+    except WhisperTranscriptionError as exc:
+        print(f"[WARN] 本地 Whisper 转写失败，使用 Mock: {exc}")
+        _apply_mock_transcript(meeting)
+        return {
+            "segments": json.loads(meeting.transcript_json or "[]"),
+            "transcript_text": MOCK_TRANSCRIPT_TEXT.strip(),
+            "source": "mock",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        print(f"[ERROR] 本地 Whisper 转写异常，使用 Mock: {exc}")
+        _apply_mock_transcript(meeting)
+        return {
+            "segments": json.loads(meeting.transcript_json or "[]"),
+            "transcript_text": MOCK_TRANSCRIPT_TEXT.strip(),
+            "source": "mock",
+            "error": str(exc),
+        }
 
 
 def _apply_mock_analysis(meeting: Meeting) -> None:
@@ -766,28 +810,36 @@ def import_meeting_audio(
     filename: str,
     content: bytes,
     title: str | None = None,
-) -> tuple[Meeting, FileValidationResult]:
+) -> tuple[Meeting, FileValidationResult, dict]:
     validation = validate_audio_file(filename, content)
     if not validation.valid:
         raise ValueError(validation.error or "文件校验失败")
 
-    file_path = save_audio_file(filename, content)
-    meeting = Meeting(
-        file_name=filename,
-        file_path=str(file_path),
-        file_size=validation.file_size,
-        upload_time=datetime.utcnow(),
-        status="processing",
-        title=title or Path(filename).stem or "未命名会议",
-    )
-    db.add(meeting)
-    db.commit()
-    db.refresh(meeting)
+    meeting: Meeting | None = None
+    try:
+        file_path = save_audio_file(filename, content)
+        meeting = Meeting(
+            file_name=filename,
+            file_path=str(file_path),
+            file_size=validation.file_size,
+            upload_time=datetime.utcnow(),
+            status="processing",
+            title=title or Path(filename).stem or "未命名会议",
+        )
+        db.add(meeting)
+        db.commit()
+        db.refresh(meeting)
 
-    _apply_mock_transcript(meeting)
-    db.commit()
-    db.refresh(meeting)
-    return meeting, validation
+        transcript_result = _transcribe_uploaded_audio(meeting)
+        db.commit()
+        db.refresh(meeting)
+        return meeting, validation, transcript_result
+    except ValueError:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise RuntimeError(f"音频处理失败：{exc}") from exc
 
 
 def _apply_transcript_variant(meeting: Meeting, label: str) -> None:
@@ -1011,7 +1063,11 @@ def ensure_seed_meetings(db: Session) -> list[Meeting]:
 
 def ensure_test_meeting(db: Session) -> Meeting:
     """兼容旧调用：返回 Q1 产品规划会种子会议。"""
-    return ensure_seed_meetings(db)[0]
+    try:
+        return ensure_seed_meetings(db)[0]
+    except Exception as exc:
+        db.rollback()
+        raise RuntimeError(f"初始化测试会议失败：{exc}") from exc
 
 
 def list_recent_meetings(db: Session, limit: int = 10) -> list[dict]:
@@ -1021,7 +1077,22 @@ def list_recent_meetings(db: Session, limit: int = 10) -> list[dict]:
         .limit(limit)
         .all()
     )
-    return [_meeting_list_item(db, m) for m in meetings]
+    return [_recent_meeting_item(m) for m in meetings]
+
+
+def _recent_meeting_item(meeting: Meeting) -> dict:
+    upload_time = (
+        meeting.upload_time.strftime("%Y-%m-%d %H:%M")
+        if meeting.upload_time
+        else ""
+    )
+    return {
+        "meeting_id": meeting.id,
+        "file_name": meeting.file_name or "",
+        "upload_time": upload_time,
+        "status": meeting.status or "processing",
+        "file_size": int(meeting.file_size or 0),
+    }
 
 
 def _meeting_list_item(db: Session, meeting: Meeting) -> dict:
@@ -1054,15 +1125,46 @@ def list_all_meetings(db: Session) -> list[dict]:
     ]
 
 
+def delete_meeting(db: Session, meeting_id: str) -> dict | None:
+    """删除会议及其纪要条目、任务与关联反馈；同时清理上传的音频文件。"""
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+    if not meeting:
+        return None
+
+    file_path = meeting.file_path
+    db.delete(meeting)
+    db.commit()
+
+    if file_path and not str(file_path).startswith("mock/"):
+        audio = Path(file_path)
+        if audio.is_file():
+            try:
+                audio.unlink()
+            except OSError:
+                pass
+
+    return {"meeting_id": meeting_id, "message": "会议已删除"}
+
+
 def _get_transcript_segments(meeting: Meeting) -> list[dict]:
     if meeting.transcript_json:
         try:
             segments = json.loads(meeting.transcript_json)
             if isinstance(segments, list) and segments:
-                return segments
+                return simplify_segments(segments)
         except json.JSONDecodeError:
             pass
     return MOCK_TRANSCRIPT
+
+
+def _build_transcript_text(segments: list[dict]) -> str:
+    lines: list[str] = []
+    for seg in segments:
+        speaker = seg.get("speaker") or "未知"
+        content = to_simplified_chinese((seg.get("content") or "").strip())
+        if content:
+            lines.append(f"{speaker}：{content}")
+    return "\n".join(lines)
 
 
 def get_summary(db: Session, meeting_id: str) -> dict | None:
@@ -1117,25 +1219,30 @@ async def get_or_generate_summary(db: Session, meeting_id: str) -> dict | None:
             if _is_duplicate_orphan(db, meeting):
                 return get_summary(db, meeting_id)
 
+            transcript_segments = _get_transcript_segments(meeting)
+            transcript_text = _build_transcript_text(transcript_segments)
+            is_seed = meeting_id in SEED_MEETING_IDS
+            fallback_items = MOCK_STRUCTURED_ITEMS if is_seed else []
+
             meeting.status = "summarizing"
             db.commit()
 
             try:
                 items, source, raw_summary = await generate_structured_summary(
-                    MOCK_TRANSCRIPT,
-                    fallback_items=MOCK_STRUCTURED_ITEMS,
-                    transcript_text=MOCK_TRANSCRIPT_TEXT,
+                    transcript_segments,
+                    fallback_items=fallback_items,
+                    transcript_text=transcript_text or None,
                 )
             except Exception as deepseek_err:
                 print(f"[WARN] DeepSeek 调用失败 meeting_id={meeting_id}: {deepseek_err}")
                 traceback.print_exc()
-                items = MOCK_STRUCTURED_ITEMS
+                items = fallback_items
                 source = "fallback"
                 raw_summary = None
 
             if not items:
-                items = MOCK_STRUCTURED_ITEMS
-                source = "fallback"
+                items = MOCK_STRUCTURED_ITEMS if is_seed else []
+                source = "fallback" if is_seed else "empty"
 
             try:
                 _save_entries_from_items(db, meeting, items, raw_summary)
