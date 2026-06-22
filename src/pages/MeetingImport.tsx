@@ -15,11 +15,13 @@ import {
   setStoredMeetingId,
   SMART_SUMMARY_PATH,
 } from '../utils/meetingRoute';
+import { onMeetingDeleted } from '../utils/meetingEvents';
 
 const MeetingImport: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingFilePickerRef = useRef(false);
 
   const [uploadMode, setUploadMode] = useState<'file' | 'record'>('file');
   const [isRecording, setIsRecording] = useState(false);
@@ -49,20 +51,22 @@ const MeetingImport: React.FC = () => {
   }, [loadRecentFiles]);
 
   useEffect(() => {
+    return onMeetingDeleted(() => {
+      loadRecentFiles();
+    });
+  }, [loadRecentFiles]);
+
+  useEffect(() => {
     const initTestMeeting = async () => {
       try {
         await ensureTestMeeting();
         setTestMeetingReady(true);
-        if (searchParams.get('stay') !== '1') {
-          setStoredMeetingId(TEST_MEETING_ID);
-          navigate(pathWithMeetingId(SMART_SUMMARY_PATH, TEST_MEETING_ID));
-        }
       } catch {
         // 后端未启动时保留导入页，不阻断正常上传
       }
     };
     initTestMeeting();
-  }, [navigate, searchParams]);
+  }, []);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -197,11 +201,29 @@ const MeetingImport: React.FC = () => {
     setIsDragOver(false);
   };
 
-  const openFilePicker = () => {
+  const fileInputId = 'meeting-audio-input';
+
+  const openFilePicker = useCallback(() => {
     if (!isUploading) {
       fileInputRef.current?.click();
     }
+  }, [isUploading]);
+
+  const handleFileModeClick = () => {
+    if (uploadMode !== 'file') {
+      pendingFilePickerRef.current = true;
+      setUploadMode('file');
+      return;
+    }
+    openFilePicker();
   };
+
+  useEffect(() => {
+    if (uploadMode === 'file' && pendingFilePickerRef.current) {
+      pendingFilePickerRef.current = false;
+      openFilePicker();
+    }
+  }, [uploadMode, openFilePicker]);
 
   const canOpenSummary = (status: string) =>
     ['completed', 'transcribed', 'summarizing', 'confirmed', 'failed'].includes(status);
@@ -248,9 +270,20 @@ const MeetingImport: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-auto p-8">
+        <input
+          ref={fileInputRef}
+          id={fileInputId}
+          type="file"
+          multiple
+          accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4,audio/x-m4a"
+          className="sr-only"
+          onChange={handleFileInputChange}
+        />
+
         <div className="flex gap-2 mb-8">
           <button
-            onClick={() => setUploadMode('file')}
+            type="button"
+            onClick={handleFileModeClick}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               uploadMode === 'file'
                 ? 'bg-blue-500 text-white'
@@ -261,6 +294,7 @@ const MeetingImport: React.FC = () => {
             文件上传
           </button>
           <button
+            type="button"
             onClick={() => setUploadMode('record')}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               uploadMode === 'record'
@@ -279,24 +313,12 @@ const MeetingImport: React.FC = () => {
             animate={{ opacity: 1, y: 0 }}
             className="max-w-2xl"
           >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4,audio/x-m4a"
-              className="hidden"
-              onChange={handleFileInputChange}
-            />
-
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={openFilePicker}
-              onKeyDown={(e) => e.key === 'Enter' && openFilePicker()}
+            <label
+              htmlFor={fileInputId}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
-              className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors bg-gray-50 dark:bg-gray-800/50 ${
+              className={`block border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors bg-gray-50 dark:bg-gray-800/50 ${
                 isDragOver
                   ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
                   : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500'
@@ -309,7 +331,7 @@ const MeetingImport: React.FC = () => {
               <p className="text-sm text-gray-500 dark:text-gray-400">
                 支持 MP3、WAV、M4A 格式，单文件最大 500MB，可一次选择多个文件
               </p>
-            </div>
+            </label>
 
             <AnimatePresence>
               {errorMessage && (

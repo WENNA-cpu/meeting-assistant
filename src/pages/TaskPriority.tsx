@@ -19,10 +19,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   updateMeetingTasks,
   extractTasksFromSummary,
+  fetchMeetingList,
   type MeetingTask,
   type TaskPriorityQuadrant,
 } from '../api/meeting';
 import { pathWithMeetingId } from '../utils/meetingRoute';
+import { onMeetingDeleted } from '../utils/meetingEvents';
 import { useMeetingIdFromRoute } from '../hooks/useMeetingIdFromRoute';
 
 const QUADRANTS: Record<
@@ -115,6 +117,22 @@ const TaskPriority: React.FC = () => {
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    return onMeetingDeleted(async ({ meetingId: deletedId }) => {
+      if (deletedId !== meetingId) return;
+      try {
+        const list = await fetchMeetingList();
+        if (list.length === 0) {
+          navigate('/import', { replace: true });
+          return;
+        }
+        navigate(pathWithMeetingId('/priority', list[0].meeting_id), { replace: true });
+      } catch {
+        navigate('/import', { replace: true });
+      }
+    });
+  }, [meetingId, navigate]);
 
   const persistUpdates = async (updates: Parameters<typeof updateMeetingTasks>[1]) => {
     if (!meetingId) return;

@@ -13,6 +13,7 @@ import {
   type MeetingListItem,
 } from '../api/meeting';
 import { pathWithMeetingId, setStoredMeetingId } from '../utils/meetingRoute';
+import { onMeetingDeleted } from '../utils/meetingEvents';
 
 type FilterType = 'all' | 'decision' | 'assignment' | 'todo' | 'issue';
 
@@ -143,13 +144,30 @@ const SmartSummary: React.FC = () => {
   }, [navigate, location.pathname]);
 
   useEffect(() => {
-    if (meetingsLoading || !activeMeetingId || meetings.length === 0) return;
-    if (meetings.some(m => m.meeting_id === activeMeetingId)) return;
+    return onMeetingDeleted(async () => {
+      try {
+        const list = await fetchMeetingList();
+        setMeetings(list);
+      } catch {
+        setMeetings([]);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (meetingsLoading) return;
+    if (meetings.length === 0) {
+      if (activeMeetingId) {
+        navigate('/import', { replace: true });
+      }
+      return;
+    }
+    if (!activeMeetingId || meetings.some(m => m.meeting_id === activeMeetingId)) return;
     const fallback = meetings.find(m => m.task_count > 0) ?? meetings[0];
     setActiveMeetingId(fallback.meeting_id);
     setStoredMeetingId(fallback.meeting_id);
     setSearchParams({ meeting_id: fallback.meeting_id }, { replace: true });
-  }, [meetings, meetingsLoading, activeMeetingId, setSearchParams]);
+  }, [meetings, meetingsLoading, activeMeetingId, setSearchParams, navigate]);
 
   const handleMeetingChange = (newMeetingId: string) => {
     if (!newMeetingId || newMeetingId === activeMeetingId) return;
@@ -467,8 +485,8 @@ const SmartSummary: React.FC = () => {
               {!meetingsLoading && meetings.length === 0 && (
                 <option value="">暂无会议，请先导入</option>
               )}
-              {meetings.map(m => (
-                <option key={m.meeting_id} value={m.meeting_id}>
+              {meetings.map((m, index) => (
+                <option key={`${m.meeting_id}-${index}`} value={m.meeting_id}>
                   {formatMeetingLabel(m)} · {m.upload_time}
                 </option>
               ))}
@@ -591,14 +609,14 @@ const SmartSummary: React.FC = () => {
                   {transcriptSearch ? '未找到匹配的转写内容' : '暂无转写片段'}
                 </p>
               ) : (
-              visibleTranscriptSegments.map((segment) => {
+              visibleTranscriptSegments.map((segment, index) => {
                 const isHighlighted =
                   highlightedSegmentIds.includes(segment.id) || highlightedSegmentId === segment.id;
                 const isCurrentPlaying = currentPlayingId === segment.id;
                 
                 return (
                   <div
-                    key={segment.id}
+                    key={`${activeMeetingId ?? 'meeting'}-${segment.id}-${index}`}
                     ref={(el) => {
                       if (el) transcriptRefs.current[segment.id] = el;
                     }}
@@ -708,17 +726,18 @@ const SmartSummary: React.FC = () => {
                 {/* Decisions */}
                 {(activeFilter === 'all' || activeFilter === 'decision') && groupedItems.decision.length > 0 && (
                   <motion.div
+                    key="summary-group-decision"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
                   >
                     <div className="space-y-2">
-                      {groupedItems.decision.map(item => {
+                      {groupedItems.decision.map((item, index) => {
                         const config = getTypeConfig(item.type);
                         const Icon = config.icon;
                         return (
                           <motion.div
-                            key={item.id}
+                            key={`decision-${item.id}-${index}`}
                             whileHover={{ scale: 1.01, x: 2 }}
                             className={`${config.bg} border ${config.border} rounded-lg p-4 cursor-pointer transition-all ${
                               item.confirmed ? 'opacity-100' : 'opacity-70'
@@ -834,17 +853,18 @@ const SmartSummary: React.FC = () => {
                 {/* Issues */}
                 {(activeFilter === 'all' || activeFilter === 'issue') && groupedItems.issue.length > 0 && (
                   <motion.div
+                    key="summary-group-issue"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
                   >
                     <div className="space-y-2">
-                      {groupedItems.issue.map(item => {
+                      {groupedItems.issue.map((item, index) => {
                         const config = getTypeConfig(item.type);
                         const Icon = config.icon;
                         return (
                           <motion.div
-                            key={item.id}
+                            key={`issue-${item.id}-${index}`}
                             whileHover={{ scale: 1.01, x: 2 }}
                             className={`${config.bg} border ${config.border} rounded-lg p-4 cursor-pointer transition-all ${
                               item.confirmed ? 'opacity-100' : 'opacity-70'
@@ -960,17 +980,18 @@ const SmartSummary: React.FC = () => {
                 {/* Assignments */}
                 {(activeFilter === 'all' || activeFilter === 'assignment') && groupedItems.assignment.length > 0 && (
                   <motion.div
+                    key="summary-group-assignment"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
                   >
                     <div className="space-y-2">
-                      {groupedItems.assignment.map(item => {
+                      {groupedItems.assignment.map((item, index) => {
                         const config = getTypeConfig(item.type);
                         const Icon = config.icon;
                         return (
                           <motion.div
-                            key={item.id}
+                            key={`assignment-${item.id}-${index}`}
                             whileHover={{ scale: 1.01, x: 2 }}
                             className={`${config.bg} border ${config.border} rounded-lg p-4 cursor-pointer transition-all ${
                               item.confirmed ? 'opacity-100' : 'opacity-70'
@@ -1086,17 +1107,18 @@ const SmartSummary: React.FC = () => {
                 {/* Todos */}
                 {(activeFilter === 'all' || activeFilter === 'todo') && groupedItems.todo.length > 0 && (
                   <motion.div
+                    key="summary-group-todo"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
                   >
                     <div className="space-y-2">
-                      {groupedItems.todo.map(item => {
+                      {groupedItems.todo.map((item, index) => {
                         const config = getTypeConfig(item.type);
                         const Icon = config.icon;
                         return (
                           <motion.div
-                            key={item.id}
+                            key={`todo-${item.id}-${index}`}
                             whileHover={{ scale: 1.01, x: 2 }}
                             className={`${config.bg} border ${config.border} rounded-lg p-4 cursor-pointer transition-all ${
                               item.confirmed ? 'opacity-100' : 'opacity-70'

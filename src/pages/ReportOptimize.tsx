@@ -14,6 +14,7 @@ import {
 import { motion } from 'framer-motion';
 import {
   optimizeReport,
+  fetchMeetingList,
   type ReportScenario,
   type ReportAudience,
   type ReportStyle,
@@ -21,6 +22,8 @@ import {
 } from '../api/meeting';
 import { fetchSettingSource } from '../api/setting';
 import { useMeetingIdFromRoute } from '../hooks/useMeetingIdFromRoute';
+import { onMeetingDeleted } from '../utils/meetingEvents';
+import { pathWithMeetingId } from '../utils/meetingRoute';
 
 const DEFAULT_ORIGINAL = `【决策】搜索功能作为P0优先级，架构重构作为P1优先级
 【分工】李四负责搜索功能需求文档，预计下周完成
@@ -76,6 +79,22 @@ const ReportOptimize: React.FC = () => {
   useEffect(() => {
     loadConclusions();
   }, [loadConclusions]);
+
+  useEffect(() => {
+    return onMeetingDeleted(async ({ meetingId: deletedId }) => {
+      if (deletedId !== meetingId) return;
+      try {
+        const list = await fetchMeetingList();
+        if (list.length === 0) {
+          navigate('/import', { replace: true });
+          return;
+        }
+        navigate(pathWithMeetingId('/report', list[0].meeting_id), { replace: true });
+      } catch {
+        navigate('/import', { replace: true });
+      }
+    });
+  }, [meetingId, navigate]);
 
   const handleOptimize = async () => {
     if (!originalText.trim()) return;

@@ -8,9 +8,22 @@ import {
   Loader2,
   AlertCircle,
   RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { fetchTaskCenter, fetchMeetingList, updateTaskStatus, formatMeetingLabel, type TaskCenterTask, type TaskCenterStatus, type MeetingListItem } from '../api/meeting';
+import { useNavigate } from 'react-router-dom';
+import {
+  fetchTaskCenter,
+  fetchMeetingList,
+  updateTaskStatus,
+  deleteMeeting,
+  formatMeetingLabel,
+  type TaskCenterTask,
+  type TaskCenterStatus,
+  type MeetingListItem,
+} from '../api/meeting';
+import { dispatchMeetingDeleted } from '../utils/meetingEvents';
+import { MEETING_ID_STORAGE_KEY, setStoredMeetingId } from '../utils/meetingRoute';
 
 type StatusFilter = 'all' | 'pending' | 'completed';
 
@@ -22,6 +35,7 @@ const PRIORITY_LABELS: Record<string, { label: string; color: string; bg: string
 };
 
 const TaskCenter: React.FC = () => {
+  const navigate = useNavigate();
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [meetingFilter, setMeetingFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -37,6 +51,8 @@ const TaskCenter: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ meetingId: string; meetingName: string } | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadTasks = useCallback(async () => {
     setLoading(true);
@@ -99,6 +115,49 @@ const TaskCenter: React.FC = () => {
       setErrorMessage(err instanceof Error ? err.message : '更新状态失败');
     } finally {
       setUpdatingId(null);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    const { meetingId, meetingName } = deleteTarget;
+    setDeletingId(meetingId);
+    setErrorMessage(null);
+    try {
+      await deleteMeeting(meetingId);
+      setMeetings(prev => prev.filter(m => m.meeting_id !== meetingId));
+      setTasks(prev => prev.filter(t => t.meeting_id !== meetingId));
+      if (meetingFilter === meetingId) {
+        setMeetingFilter('all');
+      }
+      setStats(prev => {
+        const removed = tasks.filter(t => t.meeting_id === meetingId);
+        const next = { ...prev, total: prev.total - removed.length };
+        for (const task of removed) {
+          if (task.status === 'pending') next.pending -= 1;
+          if (task.status === 'completed') next.completed -= 1;
+          if (task.status === 'postponed') next.postponed -= 1;
+          if (task.status === 'rejected') next.rejected -= 1;
+        }
+        return next;
+      });
+      dispatchMeetingDeleted(meetingId);
+      const remaining = meetings.filter(m => m.meeting_id !== meetingId);
+      if (remaining.length > 0) {
+        setStoredMeetingId(remaining[0].meeting_id);
+      } else {
+        try {
+          sessionStorage.removeItem(MEETING_ID_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        navigate('/import', { replace: true });
+      }
+      setDeleteTarget(null);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : `删除会议「${meetingName}」失败`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -284,22 +343,36 @@ const TaskCenter: React.FC = () => {
               exit={{ opacity: 0, y: -20 }}
               className="mb-8"
             >
-              <div className="flex items-center gap-3 mb-4">
-                <Calendar className="w-5 h-5 text-blue-500" />
-                <div>
-                  <h3 className="text-base font-semibold text-gray-900 dark:text-white">
-                    {group.meetingName}
-                  </h3>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {group.meetingDate} · {group.tasks.length} 个任务
-                    {group.entryCount > 0 && group.tasks.length !== group.entryCount && (
-                      <span className="text-amber-600 dark:text-amber-400">
-                        {' '}
-                        · 纪要 {group.entryCount} 条（待同步）
-                      </span>
-                    )}
-                  </p>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <Calendar className="w-5 h-5 text-blue-500" />
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900 dark:text-white">
+                      {group.meetingName}
+                    </h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {group.meetingDate} · {group.tasks.length} 个任务
+                      {group.entryCount > 0 && group.tasks.length !== group.entryCount && (
+                        <span className="text-amber-600 dark:text-amber-400">
+                          {' '}
+                          · 纪要 {group.entryCount} 条（待同步）
+                        </span>
+                      )}
+                    </p>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDeleteTarget({ meetingId: group.meetingId, meetingName: group.meetingName })
+                  }
+                  disabled={deletingId === group.meetingId}
+                  className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
+                  title="删除会议"
+                  aria-label={`删除会议 ${group.meetingName}`}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
 
               <div className="space-y-3">
@@ -417,6 +490,50 @@ const TaskCenter: React.FC = () => {
           </div>
         )}
       </div>
+
+      <AnimatePresence>
+        {deleteTarget && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => !deletingId && setDeleteTarget(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 p-6 shadow-xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">删除会议</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-6">
+                确定要删除会议「{deleteTarget.meetingName}」及其所有纪要数据吗？此操作不可撤销。
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={!!deletingId}
+                  className="px-4 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDelete}
+                  disabled={!!deletingId}
+                  className="px-4 py-2 text-sm rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {deletingId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  确认删除
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

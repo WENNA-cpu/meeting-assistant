@@ -161,6 +161,17 @@ export async function fetchMeetingList(): Promise<MeetingListItem[]> {
   return response.json();
 }
 
+export async function deleteMeeting(meetingId: string): Promise<{ meeting_id: string; message: string }> {
+  const response = await fetch(`/api/meeting/${encodeURIComponent(meetingId)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || '删除会议失败');
+  }
+  return response.json();
+}
+
 export async function fetchMeetingSummary(meetingId: string): Promise<MeetingSummaryResponse> {
   const response = await fetch(`/api/meeting/summary/${encodeURIComponent(meetingId)}?_=${Date.now()}`, {
     cache: 'no-store',
