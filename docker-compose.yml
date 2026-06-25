@@ -1,29 +1,48 @@
+# AI 会议助手 — 阿里云 ECS Docker Compose
+# 前端 8081 | 后端 8001
+# 宿主机 Nginx 见 E:/linxiAiFinance/deploy/nginx-ecs.conf
+
 services:
   backend:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
-    container_name: meeting-assistant-backend
+      target: backend
+    container_name: meeting-backend
+    env_file:
+      - .env
     ports:
-      - "8000:8000"
-    volumes:
-      - backend-data:/app/data
-      - backend-uploads:/app/uploads
+      - "8001:8001"
     environment:
-      - DATABASE_URL=sqlite:////app/data/meeting_assistant.db
+      DATABASE_URL: sqlite:////app/data/meeting_assistant.db
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+    volumes:
+      - meeting-data:/app/data
+      - meeting-uploads:/app/uploads
     restart: unless-stopped
+    networks:
+      - meeting-network
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: meeting-assistant-frontend
+      target: frontend
+    container_name: meeting-frontend
     ports:
-      - "80:80"
+      - "8081:80"
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - meeting-network
 
 volumes:
-  backend-data:
-  backend-uploads:
+  meeting-data:
+  meeting-uploads:
+
+networks:
+  meeting-network:
+    driver: bridge
